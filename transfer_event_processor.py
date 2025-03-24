@@ -24,6 +24,56 @@ def get_cutoff_day_df(df):
 
     return df
 
+# # will return a dataframe that only contains token transfers that occur on the same tx hashes as our adding or removing liquidity from lps
+def match_transaction_hashes_df(transfer_df, lp_df):
+
+    unique_lp_tx_hash_list = lp_df['tx_hash'].unique()
+
+    shared_tx_hash_df = transfer_df.loc[transfer_df['tx_hash'].isin(unique_lp_tx_hash_list)]
+
+    return shared_tx_hash_df
+
+# # gets the most recent user balance
+def get_last_user_balance(df):
+
+    unique_user_list = df['address'].unique()
+
+    df_list = []
+
+    # # filters dataframe down to subset of just each user, then down to each user's last transaction, then adds the 1 row df to df_list to later be combined with other users last event
+    for unique_user in unique_user_list:
+        temp_df = df.loc[df['address'] == unique_user]
+        last_timestamp = temp_df['timestamp'].max()
+
+        temp_df = temp_df.loc[temp_df['timestamp'] == last_timestamp]
+
+        df_list.append(temp_df)
+    
+    df = pd.concat(df_list)
+    df['last_balance'] = df['balance']
+
+    df = df[['address', 'last_balance']]
+
+    return df
+
+# # will find the percentage of a pool someone had at time of snapshot
+# # then finds their iUSD equivalent of the pool at the time of the snapshot
+def get_share_of_lp(lp_df):
+
+
+    # # filters out any negative balances
+    lp_df = lp_df.loc[lp_df['last_balance'] > 0]
+
+    # # just sums the non-zero balances together to estimate how much iUSD there was
+    pool_total_token = lp_df['last_balance'].sum()
+
+    lp_df['percentage_of_lp'] = lp_df['last_balance'] / pool_total_token
+    lp_df['token_equivalent_of_lp'] = lp_df['percentage_of_lp'] * pool_total_token
+
+    print('Total Token in Pool: ', pool_total_token)
+
+    return lp_df
+
 # Track running balances for all addresses
 def calculate_running_balances(df):
     # Sort by timestamp to ensure chronological processing
@@ -127,7 +177,9 @@ def get_user_velo_volatile_lp_balance():
     df['amount0'] /= 1e18
     df['amount1'] /= 1e6
 
-    df['amount'] = df['amount0'] + df['amount1']
+    # # would get total inputs and outputs for both tokens in pair
+    # df['amount'] = df['amount0'] + df['amount1']
+    df['amount'] = df['amount0']
 
     df = df[['timestamp', 'tx_hash', 'address', 'amount0', 'amount1', 'amount', 'event_type']]
 
@@ -139,6 +191,7 @@ def get_user_velo_volatile_lp_balance():
 
     df = make_day_column(df)
     df = get_cutoff_day_df(df)
+    df = get_last_user_balance(df)
 
     return df
 
@@ -150,6 +203,7 @@ def run_all():
 
     df = make_day_column(df)
     df = get_cutoff_day_df(df)
+    print(df)
 
     df = calculate_running_balances(df)
 
@@ -157,7 +211,9 @@ def run_all():
     last_user_balance_df = get_users_last_balances(df)
     
     # Get users' LP positions
+    # # iusd <> usdc volatile pool
     pool_balance_df = get_user_velo_volatile_lp_balance()
+    pool_balance_df = get_share_of_lp(pool_balance_df)
 
     # Save all results to CSV files
     df.to_csv(OUTPUT_CSV_FILENAME, index=False)
@@ -175,6 +231,10 @@ def run_all():
 # print("\nTop 10 LP positions:")
 # print(pool_balance_df.head(10))
 
-df = get_user_velo_volatile_lp_balance()
+transfer_df = pd.read_csv('iusd_transfers.csv')
+lp_df = pd.read_csv('velo_cl_mint_burn_events.csv')
+
+df = match_transaction_hashes_df(transfer_df, lp_df)
 print(df)
+print(len(transfer_df), len(lp_df), len(df))
 df.to_csv('test_test.csv', index=False)

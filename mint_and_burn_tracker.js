@@ -10,11 +10,18 @@ import fs from "fs";
 import path from "path";
 
 // Define the contract address to track
-const CONTRACT_ADDRESS = "0x0f53E9d4147c2073cc64a70FFc0fec9606E2EEb7";
+// // volatile iusd <> usdc
+// const CONTRACT_ADDRESS = "0x0f53E9d4147c2073cc64a70FFc0fec9606E2EEb7";
+// // cl iusd <> mode
+const CONTRACT_ADDRESS = "0xEC1D7b7058dF61ef9401DB56DbF195388b77EABa";
 
 // Define Mint and Burn event signatures separately
-const MINT_EVENT_SIGNATURE = "Mint(address,address,uint256,uint256)";
-const BURN_EVENT_SIGNATURE = "Burn(address,address,uint256,uint256)";
+// // volatile pool signatures
+// const MINT_EVENT_SIGNATURE = "Mint(address,address,uint256,uint256)";
+// const BURN_EVENT_SIGNATURE = "Burn(address,address,uint256,uint256)";
+// // cl pool signatures
+const MINT_EVENT_SIGNATURE = "Mint(address,address,int24,int24,uint128,uint256,uint256)";
+const BURN_EVENT_SIGNATURE = "Burn(address,int24,int24,uint128,uint256,uint256)";
 
 // Create topic0 hash from event signatures separately
 const MINT_TOPIC0 = keccak256(toHex(MINT_EVENT_SIGNATURE));
@@ -55,7 +62,7 @@ const createQuery = (eventTopic0, fromBlock = 11203124) => ({
 });
 
 // CSV file setup
-const CSV_FILENAME = "velo_volatile_mint_burn_events.csv";
+const CSV_FILENAME = "velo_cl_mint_burn_events.csv";
 const CSV_HEADERS = "block_number,timestamp,tx_hash,sender_address,to_address,amount0,amount1,event_type\n";
 
 // Function to process and save events for a specific event type
