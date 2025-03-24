@@ -3,7 +3,11 @@ from datetime import datetime
 
 INPUT_CSV_FILENAME = 'iusd_transfers.csv'
 OUTPUT_CSV_FILENAME = 'processed_iusd_transfers.csv'
-LP_CONTRACT_ADDRESS_LIST = ['0x2815bF2bDd198E6d09B9F02Ef6D62281b2FaAdB7', 
+VELO_VOLATILE_CSV_FILENAME = 'velo_volatile_mint_burn_events.csv'
+
+CUTOFF_DATE = '03-17-2025'
+
+LP_CONTRACT_ADDRESS_LIST = [# '0x2815bF2bDd198E6d09B9F02Ef6D62281b2FaAdB7', 
                             '0x0f53E9d4147c2073cc64a70FFc0fec9606E2EEb7', 
                             '0xEC1D7b7058dF61ef9401DB56DbF195388b77EABa', 
                             '0xA7F102e1CeC3883C2e7Ae3cD24126f836675EfEB']
@@ -12,6 +16,12 @@ LP_CONTRACT_ADDRESS_LIST = ['0x2815bF2bDd198E6d09B9F02Ef6D62281b2FaAdB7',
 def make_day_column(df):
     # Create 'day' column while preserving the original timestamp
     df['day'] = df['timestamp'].apply(lambda x: datetime.fromtimestamp(x).strftime('%m-%d-%Y'))
+    return df
+
+# # returns a dataframe with only activity before the cutoff day
+def get_cutoff_day_df(df):
+    df = df.loc[df['day'] <= CUTOFF_DATE]
+
     return df
 
 # Track running balances for all addresses
@@ -106,72 +116,31 @@ def get_users_last_balances(df):
 
     return last_balance_df
 
-def get_user_lp_balance(df):
-    """
-    Track users' LP positions by monitoring transactions with known liquidity pool addresses.
+# # our regular volatile swap pool processing
+def get_user_velo_volatile_lp_balance():
+    df = pd.read_csv(VELO_VOLATILE_CSV_FILENAME)
+
+    df['address'] = df['to_address']
     
-    When a user sends iUSD to the pool (adding liquidity):
-        - Their pool balance increases
-    When a user receives iUSD from the pool (removing liquidity):
-        - Their pool balance decreases
-        
-    Args:
-        df: DataFrame with transaction data
-        
-    Returns:
-        DataFrame with each address and their current pool balance
-    """
-    lp_contract_address_list = [x.lower() for x in LP_CONTRACT_ADDRESS_LIST]
-    
-    # Convert list to set for faster lookups
-    lp_addresses = set(lp_contract_address_list)
-    
-    # Filter transactions involving LP addresses
-    lp_txs = df[(df['from_address'].isin(lp_addresses)) | (df['to_address'].isin(lp_addresses))].copy()
-    
-    # Sort by timestamp to ensure chronological processing
-    lp_txs = lp_txs.sort_values('timestamp').reset_index(drop=True)
-    
-    # Initialize user pool balances dictionary
-    user_pool_balances = {}
-    
-    # Process each LP transaction
-    for _, tx in lp_txs.iterrows():
-        from_addr = tx['from_address']
-        to_addr = tx['to_address']
-        amount = float(tx['amount'])  # Ensure amount is float
-        
-        # Case 1: User sends to pool (adding liquidity)
-        if to_addr in lp_addresses and from_addr not in lp_addresses:
-            user = from_addr
-            # Initialize user if not present
-            if user not in user_pool_balances:
-                user_pool_balances[user] = 0
-            # Add to user's pool balance when sending to pool
-            user_pool_balances[user] += amount
-        
-        # Case 2: User receives from pool (removing liquidity)
-        elif from_addr in lp_addresses and to_addr not in lp_addresses:
-            user = to_addr
-            # Initialize user if not present
-            if user not in user_pool_balances:
-                user_pool_balances[user] = 0
-            # Subtract from user's pool balance when receiving from pool
-            user_pool_balances[user] -= amount
-    
-    # Create a DataFrame from the user pool balances
-    pool_balance_df = pd.DataFrame({
-        'address': list(user_pool_balances.keys()),
-        'pool_balance': list(user_pool_balances.values())
-    })
-    
-    # Convert to human-readable format (assuming amounts are in wei/10^18)
-    pool_balance_df['pool_balance'] = pool_balance_df['pool_balance'] / 1e18
-    
-    # Sort by pool balance descending
-    pool_balance_df = pool_balance_df.sort_values('pool_balance', ascending=False).reset_index(drop=True)
-    
-    return pool_balance_df
+    df[['timestamp', 'amount0', 'amount1']] = df[['timestamp','amount0', 'amount1']].astype(float)
+
+    df['amount0'] /= 1e18
+    df['amount1'] /= 1e6
+
+    df['amount'] = df['amount0'] + df['amount1']
+
+    df = df[['timestamp', 'tx_hash', 'address', 'amount0', 'amount1', 'amount', 'event_type']]
+
+    df = df.sort_values('timestamp', ascending=True)
+
+    df.loc[df['event_type'] == 'burn', 'amount'] = df['amount'] * -1
+    # Group by address and calculate cumulative sum within each group
+    df['balance'] = df.groupby('address')['amount'].cumsum()
+
+    df = make_day_column(df)
+    df = get_cutoff_day_df(df)
+
+    return df
 
 # Our runner function
 def run_all():
@@ -180,14 +149,15 @@ def run_all():
     df[['amount','timestamp']] = df[['amount','timestamp']].astype(float)
 
     df = make_day_column(df)
-    df = df.loc[df['day'] <= '03-17-2025']
+    df = get_cutoff_day_df(df)
+
     df = calculate_running_balances(df)
 
     # Get users' last balances
     last_user_balance_df = get_users_last_balances(df)
     
     # Get users' LP positions
-    pool_balance_df = get_user_lp_balance(df)
+    pool_balance_df = get_user_velo_volatile_lp_balance()
 
     # Save all results to CSV files
     df.to_csv(OUTPUT_CSV_FILENAME, index=False)
@@ -197,10 +167,14 @@ def run_all():
     return df, last_user_balance_df, pool_balance_df
 
 # Run everything and print sample results
-df, last_user_balances, pool_balance_df = run_all()
-print("Transaction data sample:")
-print(df.head())
-print("\nTop 10 user balances:")
-print(last_user_balances.head(10))
-print("\nTop 10 LP positions:")
-print(pool_balance_df.head(10))
+# df, last_user_balances, pool_balance_df = run_all()
+# print("Transaction data sample:")
+# print(df.head())
+# print("\nTop 10 user balances:")
+# print(last_user_balances.head(10))
+# print("\nTop 10 LP positions:")
+# print(pool_balance_df.head(10))
+
+df = get_user_velo_volatile_lp_balance()
+print(df)
+df.to_csv('test_test.csv', index=False)

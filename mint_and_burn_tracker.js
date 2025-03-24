@@ -55,7 +55,7 @@ const createQuery = (eventTopic0, fromBlock = 11203124) => ({
 });
 
 // CSV file setup
-const CSV_FILENAME = "velo_mint_burn_events.csv";
+const CSV_FILENAME = "velo_volatile_mint_burn_events.csv";
 const CSV_HEADERS = "block_number,timestamp,tx_hash,sender_address,to_address,amount0,amount1,event_type\n";
 
 // Function to process and save events for a specific event type
