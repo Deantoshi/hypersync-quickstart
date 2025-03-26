@@ -408,6 +408,7 @@ def run_all():
     df = df.loc[df['last_balance'] > 0]
     df = df.sort_values(by='last_balance', ascending=False)
     
+    # # work on this *****
     lp_df = get_user_share_of_contract_balance(og_df, df)
 
     return lp_df
