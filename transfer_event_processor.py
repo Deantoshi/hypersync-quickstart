@@ -10,7 +10,14 @@ CUTOFF_DATE = '03-17-2025'
 LP_CONTRACT_ADDRESS_LIST = [# '0x2815bF2bDd198E6d09B9F02Ef6D62281b2FaAdB7', 
                             '0x0f53E9d4147c2073cc64a70FFc0fec9606E2EEb7', 
                             '0xEC1D7b7058dF61ef9401DB56DbF195388b77EABa', 
-                            '0xA7F102e1CeC3883C2e7Ae3cD24126f836675EfEB']
+                            '0xA7F102e1CeC3883C2e7Ae3cD24126f836675EfEB'
+                            ]
+
+LP_CSV_NAME_LIST = [
+                    'velo_volatile_mint_burn_events.csv',
+                    'velo_cl_mint_burn_events.csv',
+                    'kim_cl_mint_burn_events.csv'
+                    ]
 
 # Makes our nice mm-dd-yyyy day column
 def make_day_column(df):
@@ -33,6 +40,22 @@ def match_transaction_hashes_df(transfer_df, lp_df):
 
     return shared_tx_hash_df
 
+# # will filter our transactions down to just those that go to or are from the lp_address
+def filter_to_lp_transfers(df, lp_address):
+
+    lp_address = lp_address.lower()
+
+    df_list = []
+
+    temp_df = df.loc[df['from_address'] == lp_address]
+    df_list.append(temp_df)
+    temp_df = df.loc[df['to_address'] == lp_address]
+    df_list.append(temp_df)
+
+    df = pd.concat(df_list)
+
+    return df
+
 # # gets the most recent user balance
 def get_last_user_balance(df):
 
@@ -53,6 +76,44 @@ def get_last_user_balance(df):
     df['last_balance'] = df['balance']
 
     df = df[['address', 'last_balance']]
+
+    return df
+
+# # will estimate the balances of users
+def get_rolling_balance(df, lp_address):
+    
+    df_list = []
+
+    if len(lp_address) > 0:
+        lp_address = lp_address.lower()
+
+        mint_df = df.loc[df['to_address'] == lp_address]
+        mint_df['address'] = mint_df['to_address']
+
+        burn_df = df.loc[df['from_address'] == lp_address]
+        burn_df['address'] = burn_df['from_address']
+
+        burn_df['amount'] = burn_df['amount'] * -1
+
+        df_list.append(mint_df)
+        df_list.append(burn_df)
+    
+    else:
+        from_df = df.copy()
+        from_df['address'] = df['from_address']
+        from_df['amount'] = from_df['amount'] * -1
+
+        df['address'] = df['to_address']
+        print(df)
+
+        df_list.append(from_df)
+        df_list.append(df)
+
+
+    df = pd.concat(df_list)
+    df = df.sort_values(by='timestamp', ascending=True)
+
+    # df['balance'] = df.groupby('address')['amount'].cumsum()
 
     return df
 
@@ -200,41 +261,38 @@ def run_all():
     df = pd.read_csv(INPUT_CSV_FILENAME)
     df = df.drop_duplicates(subset=['block_number','timestamp','tx_hash','from_address','to_address','amount'])
     df[['amount','timestamp']] = df[['amount','timestamp']].astype(float)
+    df = df.loc[(df['from_address'] == '0x0BBADdC57088A86A834998296565Fba0ABf89570'.lower()) | (df['to_address'] == '0x0BBADdC57088A86A834998296565Fba0ABf89570'.lower())]
 
     df = make_day_column(df)
-    df = get_cutoff_day_df(df)
     print(df)
-
-    df = calculate_running_balances(df)
-
-    # Get users' last balances
-    last_user_balance_df = get_users_last_balances(df)
+    # df = get_cutoff_day_df(df)
     
-    # Get users' LP positions
-    # # iusd <> usdc volatile pool
-    pool_balance_df = get_user_velo_volatile_lp_balance()
-    pool_balance_df = get_share_of_lp(pool_balance_df)
+    # i = 2
 
-    # Save all results to CSV files
-    df.to_csv(OUTPUT_CSV_FILENAME, index=False)
-    last_user_balance_df.to_csv('last_user_balances.csv', index=False)
-    pool_balance_df.to_csv('pool_balances.csv', index=False)
+    # while i < len(LP_CSV_NAME_LIST):
+
+    #     lp_df = pd.read_csv(LP_CSV_NAME_LIST[i])
+    #     lp_address = LP_CONTRACT_ADDRESS_LIST[i]
+
+    #     lp_df = match_transaction_hashes_df(df, lp_df)
+
+    #     lp_df = filter_to_lp_transfers(lp_df, lp_address)
+
+    #     lp_df = get_rolling_balance(lp_df, lp_address)
+
+    #     lp_df = get_last_user_balance(lp_df)
+
+    #     i += 1
     
-    return df, last_user_balance_df, pool_balance_df
+    df = get_rolling_balance(df, '')
+    # df = get_last_user_balance(df)
+
+    return df
 
 # Run everything and print sample results
-# df, last_user_balances, pool_balance_df = run_all()
-# print("Transaction data sample:")
-# print(df.head())
-# print("\nTop 10 user balances:")
-# print(last_user_balances.head(10))
-# print("\nTop 10 LP positions:")
-# print(pool_balance_df.head(10))
-
-transfer_df = pd.read_csv('iusd_transfers.csv')
-lp_df = pd.read_csv('velo_cl_mint_burn_events.csv')
-
-df = match_transaction_hashes_df(transfer_df, lp_df)
-print(df)
-print(len(transfer_df), len(lp_df), len(df))
+df = run_all()
+df = df.loc[df['address'] == '0x0BBADdC57088A86A834998296565Fba0ABf89570'.lower()]
+print("Transaction data sample:")
+print(df.head())
+print('Long: ', len(df))
 df.to_csv('test_test.csv', index=False)
