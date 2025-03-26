@@ -1,5 +1,7 @@
 import pandas as pd
 from datetime import datetime
+from web3 import Web3
+import time as tt
 
 INPUT_CSV_FILENAME = 'iusd_transfers.csv'
 OUTPUT_CSV_FILENAME = 'processed_iusd_transfers.csv'
@@ -18,6 +20,10 @@ LP_CSV_NAME_LIST = [
                     'velo_cl_mint_burn_events.csv',
                     'kim_cl_mint_burn_events.csv'
                     ]
+
+w3 = Web3(Web3.HTTPProvider('https://mainnet.mode.network'))
+
+WAIT_TIME = 0.5
 
 # Makes our nice mm-dd-yyyy day column
 def make_day_column(df):
@@ -69,13 +75,22 @@ def get_last_user_balance(df):
         last_timestamp = temp_df['timestamp'].max()
 
         temp_df = temp_df.loc[temp_df['timestamp'] == last_timestamp]
+        max_balance = temp_df['balance'].astype(float).max()
+        
+        temp_df = temp_df.loc[temp_df['balance'].astype(float) == max_balance]
 
         df_list.append(temp_df)
     
-    df = pd.concat(df_list)
+    try:
+        df = pd.concat(df_list)
+    except:
+        print(df)
+        print(unique_user_list)
+
     df['last_balance'] = df['balance']
 
     df = df[['address', 'last_balance']]
+    df['last_balance'] /= 1e18
 
     return df
 
@@ -104,7 +119,6 @@ def get_rolling_balance(df, lp_address):
         from_df['amount'] = from_df['amount'] * -1
 
         df['address'] = df['to_address']
-        print(df)
 
         df_list.append(from_df)
         df_list.append(df)
@@ -113,7 +127,112 @@ def get_rolling_balance(df, lp_address):
     df = pd.concat(df_list)
     df = df.sort_values(by='timestamp', ascending=True)
 
-    # df['balance'] = df.groupby('address')['amount'].cumsum()
+    df['balance'] = df.groupby('address')['amount'].cumsum()
+
+    return df
+
+# # Returns True if it is a contract. Returns False if it is an EOA
+def is_contract(address, w3):
+    # Get the bytecode at the address
+    code = w3.eth.get_code(address)
+    
+    # If the bytecode is empty (just '0x'), it's an EOA
+    # If it contains code, it's a contract
+    return code != '0x' and code != b'0x' and code != b'' and code != ''
+
+# # will label our df addresses on whether they are contracts or not
+def label_contracts(df, w3):
+
+    unique_address_list = df['address'].unique()
+    
+    wallet_type_list = []
+
+    try:
+        existing_label_df = pd.read_csv('existing_labels.csv')
+    except:
+        existing_label_df = pd.DataFrame()
+
+    i = 0
+
+    while i < len(unique_address_list):
+        wallet_type = ''
+        is_address_contract = False
+        unique_address_og = unique_address_list[i]
+        unique_address = w3.to_checksum_address(unique_address_og)
+
+        # # logic so we don't have to see what wallet_type someone is if we have previously labeled it
+        if len(existing_label_df) > 0:
+            temp_df = existing_label_df.loc[existing_label_df['address'] == unique_address_og]
+
+            if len(temp_df) > 0:
+                wallet_type = temp_df['wallet_type'].tolist()[0]
+        
+        if len(wallet_type) < 1:
+            is_address_contract = is_contract(unique_address, w3)
+            tt.sleep(WAIT_TIME)
+        # # end already_exists checking logic
+
+            if is_address_contract == True:
+                wallet_type = 'contract'
+            
+            else:
+                wallet_type = 'eoa'
+        
+        wallet_type_list.append(wallet_type)
+
+        i += 1
+        print('Addresses Checked: ', i, '/',len(unique_address_list))
+
+    df['wallet_type'] = wallet_type_list
+
+    df.to_csv('existing_labels.csv', index=False)
+
+
+
+    return df
+
+
+# # will find our how much each user has sent to each contract (lps, stability pool, etc.)
+def get_user_share_of_contract_balance(original_transfer_df, labeled_df):
+
+    # # filters down to just wallets that are contracts
+    contract_df = labeled_df.loc[labeled_df['wallet_type'] == 'contract']
+
+    # # puts all the contract addresses into a list
+    contract_address_list = contract_df['address'].unique()
+
+    df_list = []
+
+    # # for every contract address
+    for contract_address in contract_address_list:
+        
+        temp_df_list = []
+        temp_df = original_transfer_df.copy()
+
+        # # widthraws
+        temp_df = temp_df.loc[temp_df['from_address'] == contract_address]
+        temp_df['amount'] = temp_df['amount'] * -1
+        temp_df['address'] = temp_df['from_address']
+        temp_df_list.append(temp_df)
+
+        # # deposits
+        temp_df = original_transfer_df.copy()
+        temp_df = temp_df.loc[temp_df['to_address'] == contract_address]
+        temp_df['address'] = temp_df['to_address']
+
+        temp_df = pd.concat(temp_df_list)
+        temp_df = temp_df.sort_values(by='timestamp', ascending=True)
+
+        temp_df['balance'] = temp_df.groupby('address')['amount'].cumsum()
+
+        if len(temp_df) > 0:
+            temp_df = get_last_user_balance(temp_df)
+            df_list.append(temp_df)
+        else:
+            print('Empty Balance address: ', contract_address)
+    
+    print(df_list)
+    df = pd.concat(df_list)
 
     return df
 
@@ -261,10 +380,9 @@ def run_all():
     df = pd.read_csv(INPUT_CSV_FILENAME)
     df = df.drop_duplicates(subset=['block_number','timestamp','tx_hash','from_address','to_address','amount'])
     df[['amount','timestamp']] = df[['amount','timestamp']].astype(float)
-    df = df.loc[(df['from_address'] == '0x0BBADdC57088A86A834998296565Fba0ABf89570'.lower()) | (df['to_address'] == '0x0BBADdC57088A86A834998296565Fba0ABf89570'.lower())]
 
     df = make_day_column(df)
-    print(df)
+    og_df = df.copy()
     # df = get_cutoff_day_df(df)
     
     # i = 2
@@ -285,13 +403,18 @@ def run_all():
     #     i += 1
     
     df = get_rolling_balance(df, '')
-    # df = get_last_user_balance(df)
+    df = get_last_user_balance(df)
+    df = label_contracts(df, w3)
+    df = df.loc[df['last_balance'] > 0]
+    df = df.sort_values(by='last_balance', ascending=False)
+    
+    lp_df = get_user_share_of_contract_balance(og_df, df)
 
-    return df
+    return lp_df
 
 # Run everything and print sample results
 df = run_all()
-df = df.loc[df['address'] == '0x0BBADdC57088A86A834998296565Fba0ABf89570'.lower()]
+# df = df.loc[df['address'] == '0x0f53E9d4147c2073cc64a70FFc0fec9606E2EEb7'.lower()]
 print("Transaction data sample:")
 print(df.head())
 print('Long: ', len(df))
