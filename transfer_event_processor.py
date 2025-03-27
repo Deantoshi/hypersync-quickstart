@@ -158,17 +158,19 @@ def label_contracts(df, w3):
         wallet_type = ''
         is_address_contract = False
         unique_address_og = unique_address_list[i]
+
         unique_address = w3.to_checksum_address(unique_address_og)
 
         # # logic so we don't have to see what wallet_type someone is if we have previously labeled it
         if len(existing_label_df) > 0:
-            temp_df = existing_label_df.loc[existing_label_df['address'] == unique_address_og]
+            temp_df = existing_label_df.loc[existing_label_df['address'] == unique_address_og.lower()]
 
             if len(temp_df) > 0:
                 wallet_type = temp_df['wallet_type'].tolist()[0]
         
         if len(wallet_type) < 1:
             is_address_contract = is_contract(unique_address, w3)
+            print('Wallet Checked: ', unique_address)
             tt.sleep(WAIT_TIME)
         # # end already_exists checking logic
 
@@ -181,60 +183,208 @@ def label_contracts(df, w3):
         wallet_type_list.append(wallet_type)
 
         i += 1
-        print('Addresses Checked: ', i, '/',len(unique_address_list))
+        # print('Addresses Checked: ', i, '/',len(unique_address_list))
 
-    df['wallet_type'] = wallet_type_list
+    try:
+        df['wallet_type'] = wallet_type_list
+    except:
+        df = df.drop_duplicates(subset=['address', 'last_balance'])
+        df['wallet_type'] = wallet_type_list
+    
+    df = df.drop_duplicates(subset=['address', 'wallet_type'])
+    df['address'] = df['address'].astype(str).str.lower()
 
-    df.to_csv('existing_labels.csv', index=False)
-
-
+    df_list = [existing_label_df, df]
+    existing_label_df = pd.concat(df_list)
+    existing_label_df.to_csv('existing_labels.csv', index=False)
 
     return df
 
 
 # # will find our how much each user has sent to each contract (lps, stability pool, etc.)
-def get_user_share_of_contract_balance(original_transfer_df, labeled_df):
-
-    # # filters down to just wallets that are contracts
-    contract_df = labeled_df.loc[labeled_df['wallet_type'] == 'contract']
-
-    # # puts all the contract addresses into a list
-    contract_address_list = contract_df['address'].unique()
-
-    df_list = []
-
-    # # for every contract address
-    for contract_address in contract_address_list:
-        
-        temp_df_list = []
-        temp_df = original_transfer_df.copy()
-
-        # # widthraws
-        temp_df = temp_df.loc[temp_df['from_address'] == contract_address]
-        temp_df['amount'] = temp_df['amount'] * -1
-        temp_df['address'] = temp_df['from_address']
-        temp_df_list.append(temp_df)
-
-        # # deposits
-        temp_df = original_transfer_df.copy()
-        temp_df = temp_df.loc[temp_df['to_address'] == contract_address]
-        temp_df['address'] = temp_df['to_address']
-
-        temp_df = pd.concat(temp_df_list)
-        temp_df = temp_df.sort_values(by='timestamp', ascending=True)
-
-        temp_df['balance'] = temp_df.groupby('address')['amount'].cumsum()
-
-        if len(temp_df) > 0:
-            temp_df = get_last_user_balance(temp_df)
-            df_list.append(temp_df)
-        else:
-            print('Empty Balance address: ', contract_address)
+def get_user_share_of_contract_balance(original_transfer_df, labeled_df, w3, max_iterations=3):
+    """
+    Attribute contract balances to EOA wallets that interacted with the contracts.
     
-    print(df_list)
-    df = pd.concat(df_list)
-
-    return df
+    Parameters:
+    -----------
+    original_transfer_df : DataFrame
+        Contains all iUSD token transfers with columns:
+        - from_address: Sender address
+        - to_address: Receiver address
+        - amount: Transfer amount
+        - timestamp: Transfer timestamp
+    
+    labeled_df : DataFrame
+        Contains wallets and their types:
+        - address: Wallet address
+        - last_balance: Current balance
+        - wallet_type: 'eoa' or 'contract'
+    
+    w3 : Web3
+        Web3 connection object
+    
+    max_iterations : int, default=3
+        Maximum iterations for handling contract-to-contract attributions
+    
+    Returns:
+    --------
+    DataFrame
+        All wallets with original and attributed balances
+    """
+    # Create a copy to avoid modifying the original
+    result_df = labeled_df.copy()
+    
+    # Add column for attributed balance
+    if 'attributed_balance' not in result_df.columns:
+        result_df['attributed_balance'] = 0.0
+    
+    # Track which contracts we've processed
+    processed_contracts = set()
+    
+    # Process contracts iteratively to handle contract-to-contract interactions
+    for iteration in range(max_iterations):
+        print(f"Iteration {iteration+1} of {max_iterations}")
+        
+        # Get unprocessed contracts
+        contract_df = result_df.loc[
+            (result_df['wallet_type'] == 'contract') & 
+            (~result_df['address'].isin(processed_contracts))
+        ]
+        
+        contract_addresses = contract_df['address'].unique()
+        
+        if len(contract_addresses) == 0:
+            print(f"No more unprocessed contracts at iteration {iteration+1}")
+            break
+        
+        # Store attribution data for this iteration
+        iteration_data = []
+        
+        # Process each contract
+        for contract_address in contract_addresses:
+            # Get contract's current balance
+            contract_row = result_df.loc[result_df['address'] == contract_address]
+            if contract_row.empty:
+                continue
+                
+            contract_balance = contract_row['last_balance'].iloc[0]
+            
+            # Skip if effectively zero balance
+            if abs(contract_balance) < 1e-10:
+                processed_contracts.add(contract_address)
+                continue
+            
+            # Get withdrawals (transfers FROM the contract)
+            withdrawals = original_transfer_df.loc[
+                original_transfer_df['from_address'] == contract_address
+            ].copy()
+            withdrawals['amount'] = -withdrawals['amount']  # Mark as negative
+            withdrawals['address'] = withdrawals['to_address']  # Track recipient
+            
+            # Get deposits (transfers TO the contract)
+            deposits = original_transfer_df.loc[
+                original_transfer_df['to_address'] == contract_address
+            ].copy()
+            deposits['address'] = deposits['from_address']  # Track sender
+            
+            # Combine transfers and sort chronologically
+            contract_transfers = pd.concat([withdrawals, deposits])
+            contract_transfers = contract_transfers.sort_values(by='timestamp')
+            
+            # Skip if no transactions
+            if len(contract_transfers) == 0:
+                processed_contracts.add(contract_address)
+                continue
+            
+            # Calculate running balance per address
+            contract_transfers['balance'] = contract_transfers.groupby('address')['amount'].cumsum()
+            
+            # Get latest balance for each address
+            latest_balances = contract_transfers.groupby('address')['balance'].last().reset_index()
+            
+            # Label addresses as EOA or contract
+            latest_balances = latest_balances.merge(
+                result_df[['address', 'wallet_type']], 
+                on='address', 
+                how='left'
+            )
+            
+            # Default to EOA for any addresses not in our labeled_df
+            latest_balances['wallet_type'] = latest_balances['wallet_type'].fillna('eoa')
+            
+            # Calculate total positive contribution
+            total_positive = latest_balances.loc[latest_balances['balance'] > 0, 'balance'].sum()
+            
+            # Skip if no positive balances
+            if total_positive <= 0:
+                processed_contracts.add(contract_address)
+                continue
+            
+            # Attribute contract balance proportionally to addresses with positive balances
+            for _, row in latest_balances.iterrows():
+                address = row['address']
+                balance = row['balance']
+                wallet_type = row['wallet_type']
+                
+                # Only attribute to addresses with positive contributions
+                if balance <= 0:
+                    continue
+                
+                # Calculate proportional share of the contract's balance
+                attributed_share = (balance / total_positive) * contract_balance
+                
+                iteration_data.append({
+                    'address': address,
+                    'attributed_balance': attributed_share,
+                    'source_contract': contract_address,
+                    'wallet_type': wallet_type
+                })
+            
+            # Mark as processed
+            processed_contracts.add(contract_address)
+        
+        # Convert iteration data to DataFrame
+        if len(iteration_data) == 0:
+            print(f"No attributions in iteration {iteration+1}")
+            break
+            
+        iteration_df = pd.DataFrame(iteration_data)
+        
+        # Group by address to sum attributions from different contracts
+        address_attributions = iteration_df.groupby(['address', 'wallet_type'])['attributed_balance'].sum().reset_index()
+        
+        # Update result DataFrame
+        for _, row in address_attributions.iterrows():
+            address = row['address']
+            wallet_type = row['wallet_type']
+            attributed_balance = row['attributed_balance']
+            
+            # If address exists, update its attributed balance
+            if address in result_df['address'].values:
+                idx = result_df.loc[result_df['address'] == address].index[0]
+                result_df.at[idx, 'attributed_balance'] += attributed_balance
+                
+                # If this is a contract we just processed, zero its balance
+                if address in processed_contracts:
+                    result_df.at[idx, 'last_balance'] = 0
+            else:
+                # Add new row for addresses not in original DataFrame
+                new_row = pd.DataFrame({
+                    'address': [address],
+                    'last_balance': [0],
+                    'attributed_balance': [attributed_balance],
+                    'wallet_type': [wallet_type]
+                })
+                result_df = pd.concat([result_df, new_row], ignore_index=True)
+    
+    # Calculate total balance (original + attributed)
+    result_df['total_balance'] = result_df['last_balance'] + result_df['attributed_balance']
+    
+    # Filter to just EOA wallets if needed
+    # eoa_result_df = result_df[result_df['wallet_type'] == 'eoa']
+    
+    return result_df
 
 # # will find the percentage of a pool someone had at time of snapshot
 # # then finds their iUSD equivalent of the pool at the time of the snapshot
@@ -288,63 +438,6 @@ def calculate_running_balances(df):
         df.at[idx, 'to_balance_after'] = balances[to_addr]
     
     return df
-
-
-def get_users_last_balances(df):
-    """
-    Calculate each user's most recent balance based on their latest transaction.
-    
-    Args:
-        df: DataFrame with transaction data and running balances
-        
-    Returns:
-        DataFrame with each address and their latest balance
-    """
-    # Ensure data is sorted by timestamp
-    df = df.sort_values('timestamp')
-    
-    # Get all unique addresses
-    from_addresses = set(df['from_address'])
-    to_addresses = set(df['to_address'])
-    all_addresses = from_addresses.union(to_addresses)
-    
-    # Initialize dictionary to store last balances
-    last_balances = {}
-    
-    # For each address, find their latest transaction and balance
-    for address in all_addresses:
-        # Get rows where address is sender
-        mask_from = df['from_address'] == address
-        # Get rows where address is receiver 
-        mask_to = df['to_address'] == address
-        
-        # Find last transaction where this address appears
-        last_from_tx = df[mask_from].iloc[-1] if any(mask_from) else None
-        last_to_tx = df[mask_to].iloc[-1] if any(mask_to) else None
-        
-        # Determine which transaction is more recent
-        if last_from_tx is not None and last_to_tx is not None:
-            if last_from_tx['timestamp'] > last_to_tx['timestamp']:
-                last_balances[address] = last_from_tx['from_balance_after']
-            else:
-                last_balances[address] = last_to_tx['to_balance_after']
-        elif last_from_tx is not None:
-            last_balances[address] = last_from_tx['from_balance_after']
-        elif last_to_tx is not None:
-            last_balances[address] = last_to_tx['to_balance_after']
-    
-    # Convert to DataFrame
-    last_balance_df = pd.DataFrame({
-        'address': list(last_balances.keys()),
-        'last_balance': list(last_balances.values())
-    })
-    
-    # Sort by balance descending
-    last_balance_df = last_balance_df.sort_values('last_balance', ascending=False).reset_index(drop=True)
-    
-    last_balance_df['last_balance'] = last_balance_df['last_balance'] / 1e18
-
-    return last_balance_df
 
 # # our regular volatile swap pool processing
 def get_user_velo_volatile_lp_balance():
@@ -409,7 +502,7 @@ def run_all():
     df = df.sort_values(by='last_balance', ascending=False)
     
     # # work on this *****
-    lp_df = get_user_share_of_contract_balance(og_df, df)
+    lp_df = get_user_share_of_contract_balance(og_df, df, w3)
 
     return lp_df
 
